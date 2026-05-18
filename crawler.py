@@ -87,13 +87,24 @@ def fetch_listing_page(page_num):
 
 
 def detect_total_pages():
-    """Detect total number of listing pages from the first page."""
-    r = session.get(f"{BASE_URL}/Page/35", timeout=REQUEST_TIMEOUT)
+    """Detect total number of listing pages from the API response."""
+    ids = fetch_listing_page(1)
+    if ids is None:
+        return None
+    r = session.post(API_URL,
+        headers={"CUSTOMER-CSRF-HEADER": ""},
+        data={"lang": "zh", "country": "TW", "detailno": "1", "tag": "Page", "no": "35"},
+        timeout=REQUEST_TIMEOUT,
+    )
     r.encoding = "utf-8"
-    m = re.search(r"共\s*(\d+)\s*頁", r.text)
-    if m:
-        return int(m.group(1))
-    return None
+    soup = BeautifulSoup(r.text, "lxml")
+    max_page = 0
+    for a in soup.find_all("a", attrs={"data-page": True}):
+        try:
+            max_page = max(max_page, int(a["data-page"]))
+        except ValueError:
+            pass
+    return max_page if max_page > 0 else None
 
 
 def roc_to_iso_date(roc_date_str):

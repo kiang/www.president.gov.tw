@@ -33,40 +33,54 @@ The Taiwan Presidential Office publishes official news at:
 https://www.president.gov.tw/Page/35
 ```
 
-As of May 2026, the archive contains **1,944 pages** of news articles, spanning from **2003 (ROC year 92)** to the present. Individual articles are accessible at URLs like:
+As of May 2026, the archive contains **1,944 pages** of news articles (~15 articles per page, ~29,000 total), spanning from **1992 (ROC year 81)** to the present. Individual articles are accessible at URLs like:
 
 ```
 https://www.president.gov.tw/NEWS/{id}
 ```
 
-where `{id}` is a sequential integer. The earliest known valid ID is **1**, and the latest as of May 2026 is approximately **40055**.
+where `{id}` is an integer. The listing pages are numbered 1 (newest) through 1,944 (oldest).
 
 ---
 
 ## 2. Website Analysis
 
-### Why not crawl the listing pages?
+### The internal pagination API
 
-The listing page at `/Page/35` uses **client-side JavaScript pagination**. The pagination links are rendered as:
+The listing page at `/Page/35` uses client-side JavaScript for pagination. The pagination links are rendered as `<a href="javascript:;">` and trigger an AJAX call.
 
-```html
-<a href="javascript:;" title="第2頁">2</a>
+By analyzing the site's JavaScript (`/_content/custom/ViewComponents/News/index.js`), we discovered the internal API:
+
+```
+POST https://www.president.gov.tw/WebAPI/News/List
 ```
 
-There are no server-side query parameters (like `?page=2`), no ASP.NET ViewState fields, and no discoverable AJAX API endpoints. The pagination is entirely driven by JavaScript that cannot be replayed with simple HTTP requests.
+#### Request parameters
 
-### The alternative: direct article ID iteration
+| Parameter | Value | Description |
+|---|---|---|
+| `lang` | `zh` | Language code |
+| `country` | `TW` | Country code |
+| `detailno` | `1` | Page number (1 = newest) |
+| `tag` | `Page` | URL segment type |
+| `no` | `35` | The page ID for "總統府新聞" |
 
-Each news article has a unique sequential integer ID. The crawler iterates through all possible IDs and fetches each article directly via its URL.
+#### Required headers
 
-| Property | Value |
-|---|---|
-| Article URL pattern | `https://www.president.gov.tw/NEWS/{id}` |
-| Valid ID range | 1 to ~40055 (grows over time) |
-| Date range | 2003-07 (ROC 92) to present |
-| Expected valid articles | ~29,000 (1,944 pages x ~15 per page) |
-| Invalid IDs | Return HTTP 302 redirect to the homepage |
-| Valid IDs | Return HTTP 308 (HTTPS redirect) then HTTP 200 |
+| Header | Value | Description |
+|---|---|---|
+| `CUSTOMER-CSRF-HEADER` | (empty string) | CSRF token; the page has no `CustomerFieldName` input, so empty works |
+
+The API returns an HTML fragment containing the news list for that page.
+
+#### Discovery process
+
+The JavaScript pagination flow was traced through these files:
+
+1. **`index.js`** — calls `PostAjaxNoShowHint()` with URL `GetApiUrl() + "/WebAPI/News/List"` and form data including `detailno` (page number)
+2. **`apiurl.js`** — `GetApiUrl()` returns the current host
+3. **`formUtility.js`** — `SetPostAjaxObject()` adds `tag`, `no` from `WebMenuUtility.Parse(location.pathname)`; for `/Page/35` this yields `tag=Page`, `no=35`
+4. **`headerUtility.js`** — `GetDefaultHeaders()` reads a CSRF token from `input[name='CustomerFieldName']`, which doesn't exist in the page HTML, so the header is sent with an empty value
 
 ### Encoding issue
 
@@ -104,10 +118,10 @@ Project files:
 │
 Output files (generated):
 ├── news_json/
-│   ├── 2003/
-│   │   ├── 3.json
+│   ├── 1992/
 │   │   └── ...
-│   ├── 2004/
+│   ├── 2003/
+│   │   └── ...
 │   ├── ...
 │   └── 2026/
 │       ├── 40050.json
@@ -122,8 +136,8 @@ Output files (generated):
 ```
 crawler.py                 Standalone — all core functions
     ↑
-crawler_latest.py          Imports: detect_max_id, fetch_article, save_article
-    ↑
+crawler_latest.py          Imports: init_session, fetch_listing_page,
+    ↑                               fetch_article, save_article
 cron.sh                    Calls crawler_latest.py
 
 analyze.py                 Standalone — reads news_json/ directory
@@ -155,14 +169,24 @@ pip install requests beautifulsoup4 lxml
 python3 crawler.py
 ```
 
-The upper bound is **auto-detected** from the listing page at `/Page/35`. The crawler processes IDs in **descending order** (newest first) and skips articles that already exist on disk.
+The total number of listing pages is **auto-detected** from the site. The crawler paginates through all listing pages (page 1 = newest, page 1944 = oldest), discovers the article IDs on each page, and fetches each article. Articles already on disk are skipped by default.
 
-Estimated runtime: **several hours** at default settings (0.5s delay per request).
+Estimated runtime: **several hours** at default settings (0.5s delay per request, ~15 articles per page, ~1944 pages).
 
-#### Crawl a specific range
+#### Crawl a specific page range
 
 ```bash
-python3 crawler.py --start 30000 --end 35000
+# Crawl only the first 10 pages (newest articles)
+python3 crawler.py --start-page 1 --end-page 10
+
+# Crawl pages 500 to 600
+python3 crawler.py --start-page 500 --end-page 600
+```
+
+#### Re-fetch existing articles
+
+```bash
+python3 crawler.py --no-skip
 ```
 
 #### Fetch a single article (for testing)
@@ -183,9 +207,10 @@ python3 crawler.py --delay 1.0
 
 | Argument | Default | Description |
 |---|---|---|
-| `--start` | `1` | First NEWS ID to crawl |
-| `--end` | (auto-detect) | Last NEWS ID to crawl; scraped from the listing page if not provided |
+| `--start-page` | `1` | First listing page to crawl (1 = newest) |
+| `--end-page` | (auto-detect) | Last listing page to crawl; detected from the site if not provided |
 | `--delay` | `0.5` | Seconds between requests |
+| `--no-skip` | off | Re-fetch articles even if they already exist on disk |
 | `--single` | (none) | Fetch and print one article by ID |
 
 ---
@@ -196,7 +221,7 @@ python3 crawler.py --delay 1.0
 python3 crawler_latest.py
 ```
 
-Fetches the **50 most recent** articles by counting down from the auto-detected latest ID. **Always overwrites** existing JSON files to capture any edits or corrections to recent articles.
+Fetches the **50 most recent** articles by paginating through the first few listing pages. **Always overwrites** existing JSON files to capture any edits or corrections to recent articles.
 
 This script is designed to be run daily via `cron.sh`.
 
@@ -342,6 +367,7 @@ The ROC calendar year = Western year minus 1911. The `roc_to_iso_date` function 
 
 | ROC date | ISO date |
 |---|---|
+| 81年01月09日 | 1992-01-09 |
 | 92年07月20日 | 2003-07-20 |
 | 104年11月27日 | 2015-11-27 |
 | 115年05月16日 | 2026-05-16 |
@@ -352,17 +378,14 @@ Articles are organized into year-based subdirectories derived from the ISO date:
 
 ```
 news_json/
-├── 2003/          ← Earliest articles
+├── 1992/          ← Earliest articles (page 1944)
+│   └── 22734.json
+├── 2003/
 │   ├── 3.json
-│   ├── 50.json
 │   └── 100.json
-├── 2005/
-│   └── 10000.json
 ├── 2015/
 │   └── 20000.json
-├── 2022/
-│   └── 26690.json
-├── 2026/          ← Latest articles
+├── 2026/          ← Latest articles (page 1)
 │   ├── 40050.json
 │   └── 40055.json
 └── unknown/       ← Articles where date parsing failed
@@ -372,24 +395,34 @@ news_json/
 
 ## 7. How It Works
 
+### Two-phase crawl
+
+The crawler uses a two-phase approach:
+
+1. **Phase 1: Discover article IDs** — POST to the internal listing API (`/WebAPI/News/List`) with a page number. The API returns an HTML fragment containing article links (`/NEWS/{id}`). The crawler extracts all IDs from each page.
+
+2. **Phase 2: Fetch full articles** — for each discovered ID, send a GET request to `/NEWS/{id}` and parse the full article page.
+
+This eliminates the previous approach of guessing sequential IDs, which wasted requests on non-existent IDs and triggered rate limiting.
+
 ### crawler.py — full crawl
 
-1. **Auto-detect max ID** — fetch `/Page/35` and find the highest `/NEWS/{id}` link.
-2. **Load skip list** — combine IDs from `crawl_progress.json` and existing files in `news_json/`.
-3. **Build work queue** — generate IDs from max down to 1, excluding the skip list.
-4. **Process sequentially** — for each ID:
-   - Wait `DELAY_BETWEEN_REQUESTS` seconds.
-   - Call `fetch_article(id)`.
-   - Save the result to `news_json/YYYY/ID.json`.
-5. **Rate-limit detection** — if 50 consecutive IDs return "not found", the delay doubles (up to 60s max). It resets when a valid article is found.
-6. **Save progress** — write `crawl_progress.json` every 100 IDs.
+1. **Initialize session** — visit `/Page/35` to establish cookies.
+2. **Detect total pages** — parse "共 1944 頁" from the listing page.
+3. **Scan existing files** — scan `news_json/` for articles already on disk.
+4. **Load progress** — read `crawl_progress.json` to skip already-completed pages.
+5. **For each listing page** (1 through 1944):
+   - POST to `/WebAPI/News/List` with `detailno={page}` to get article IDs.
+   - For each ID not already on disk: fetch the full article and save as JSON.
+   - Mark the page as completed in progress file.
+6. **Log progress** — after each page, log fetched/skipped/error counts.
 
 ### crawler_latest.py — daily update
 
-1. **Auto-detect max ID** — same as above.
-2. **Count down from max ID** — fetch articles one by one.
-3. **Stop after 50 found** — once 50 valid articles have been saved, exit.
-4. **Always overwrite** — does not check for existing files; always writes fresh JSON.
+1. **Initialize session** — same as above.
+2. **Paginate from page 1** — fetch listing pages starting from the newest.
+3. **Fetch each article** — always overwrite, no skip check.
+4. **Stop after 50** — once 50 articles have been saved, exit.
 
 ### fetch_article — shared core
 
@@ -402,14 +435,6 @@ news_json/
 7. Return a dict with all extracted fields.
 8. On network errors, retry up to 3 times with exponential backoff (1s, 2s, 4s).
 
-### Detecting non-existent articles
-
-Not all sequential IDs have articles. The website handles invalid IDs by issuing an HTTP redirect to the homepage (`https://www.president.gov.tw/`). The crawler detects this by checking if the final URL after following redirects matches the homepage.
-
-### Rate-limit detection
-
-The presidential website may temporarily return redirects for all requests when too many are made in a short period. Since both "article doesn't exist" and "rate limited" result in a homepage redirect, the crawler uses a heuristic: if 50 consecutive IDs all return "not found," it assumes rate limiting and exponentially increases the delay between requests (doubling each time, up to 60 seconds). The delay resets to normal as soon as a valid article is found.
-
 ---
 
 ## 8. Configuration
@@ -419,23 +444,24 @@ The presidential website may temporarily return redirects for all requests when 
 | Constant | Default | Description |
 |---|---|---|
 | `BASE_URL` | `https://www.president.gov.tw` | Website base URL |
+| `API_URL` | `{BASE_URL}/WebAPI/News/List` | Internal listing API endpoint |
 | `OUTPUT_DIR` | `news_json` | Directory for saved JSON files |
 | `PROGRESS_FILE` | `crawl_progress.json` | Resume state file |
-| `MAX_ID` | `41000` | Fallback upper bound (used only if auto-detect fails) |
 | `REQUEST_TIMEOUT` | `30` | HTTP timeout in seconds |
 | `RETRY_COUNT` | `3` | Max retries per request |
 | `DELAY_BETWEEN_REQUESTS` | `0.5` | Base delay in seconds |
 
 ### HTTP session
 
-The crawler uses a persistent `requests.Session` with these headers:
+The crawler uses a persistent `requests.Session` with standard browser headers:
 
 ```
-User-Agent: Mozilla/5.0 (compatible; PresidentialNewsCrawler/1.0)
-Accept-Language: zh-TW,zh;q=0.9,en;q=0.8
+User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8
+Accept-Language: zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7
 ```
 
-The session reuses TCP connections across requests for efficiency.
+The session reuses TCP connections and cookies across requests for efficiency.
 
 ---
 
@@ -443,27 +469,21 @@ The session reuses TCP connections across requests for efficiency.
 
 ### crawler.py
 
-The full crawler has two layers of resume support:
-
-1. **Progress file** (`crawl_progress.json`) — tracks all processed IDs (both found and not-found):
+The full crawler tracks progress at the **page level**:
 
 ```json
 {
-  "completed_ids": [1, 2, 3, 4, 5],
-  "failed_ids": [],
-  "last_id": 5
+  "completed_pages": [1, 2, 3, 4, 5],
+  "last_page": 5
 }
 ```
 
-2. **Disk scan** — on startup, scans `news_json/` for existing `.json` files and skips those IDs too.
+On startup, it also scans `news_json/` for existing article files. Together:
 
-Together, this means:
-
+- **Completed pages** are skipped entirely (no API call or article fetches).
+- **Articles on disk** are skipped even for pages not yet marked complete (e.g. if the crawler was interrupted mid-page).
 - You can **stop the crawler at any time** (Ctrl+C) and resume later.
-- You can **re-run the same command** and it will only process remaining IDs.
 - To **start fresh**, delete both `crawl_progress.json` and the `news_json/` directory.
-
-Progress is saved every 100 articles.
 
 ### crawler_latest.py
 
@@ -478,8 +498,9 @@ No progress tracking. Always fetches the latest 50 articles and overwrites exist
 Output goes to both the console and `crawler.log` (UTF-8 encoded).
 
 ```
-2026-05-18 11:03:07,582 [INFO] Crawling 40005 IDs from 40055 down to 1 (150 already done)
-2026-05-18 11:03:12,648 [INFO] Progress: 100/40005 | Found: 42 | Not found: 58 | Errors: 0
+2026-05-18 11:30:01,182 [INFO] Found 1091 existing articles on disk
+2026-05-18 11:30:02,209 [INFO] Page 1/1944 | IDs: 15 | Fetched: 0 | Skipped: 15 | Total: 0 fetched, 15 skipped, 0 errors
+2026-05-18 11:30:03,129 [INFO] Page 2/1944 | IDs: 15 | Fetched: 0 | Skipped: 15 | Total: 0 fetched, 30 skipped, 0 errors
 ```
 
 ### crawler_latest.py
@@ -487,17 +508,17 @@ Output goes to both the console and `crawler.log` (UTF-8 encoded).
 Output goes to both the console and `crawler_latest.log`.
 
 ```
-2026-05-18 11:10:00,123 [INFO] Detected latest NEWS ID: 40055
 2026-05-18 11:10:01,456 [INFO] [1/50] ID 40055: 總統盼公私協力提升心血管疾病防治與照護...
+2026-05-18 11:10:02,789 [INFO] [2/50] ID 40054: 總統府回應美國總統川普接受媒體訪問相關內容...
 ```
 
 ### Log levels
 
 | Level | When |
 |---|---|
-| `INFO` | Start, progress, completion, each found article (latest crawler) |
-| `WARNING` | Failed to fetch after all retries, possible rate limiting detected |
-| `ERROR` | Unexpected exception during article processing |
+| `INFO` | Start, page progress, completion, each found article (latest crawler) |
+| `WARNING` | Failed to fetch a specific article, failed listing page |
+| `ERROR` | Failed to fetch a listing page after all retries |
 
 ---
 
@@ -511,21 +532,30 @@ The server sends `Content-Type: text/html` without a charset. The crawler forces
 export LANG=en_US.UTF-8
 ```
 
-### Many consecutive IDs return "not found"
+### Listing API returns 400 or empty response
 
-This may indicate **rate limiting**. The crawler will automatically detect this (after 50 consecutive misses) and back off with increasing delays. If the problem persists, increase the base delay:
+The API requires:
+1. A valid session — the crawler calls `init_session()` first to visit `/Page/35` and establish cookies.
+2. The `CUSTOMER-CSRF-HEADER` header (can be empty).
+3. The `tag=Page` and `no=35` parameters.
+
+If the API stops working, check whether the site's JavaScript files have changed by re-examining `/_content/custom/ViewComponents/News/index.js`.
+
+### Crawler hangs or times out
+
+The default timeout is 30 seconds per request. Edit `REQUEST_TIMEOUT` in `crawler.py` if the server is consistently slow. You can also increase the delay between requests:
 
 ```bash
 python3 crawler.py --delay 2.0
 ```
 
-### Crawler hangs or times out
+### Old progress file causes errors
 
-The default timeout is 30 seconds per request. Edit `REQUEST_TIMEOUT` in `crawler.py` if the server is consistently slow.
+If you see `KeyError: 'completed_pages'`, the progress file is from the old ID-based crawler. Delete it:
 
-### Want to re-crawl failed IDs
-
-Failed IDs are tracked in `crawl_progress.json` under `failed_ids`. To retry them, remove those IDs from `completed_ids` and re-run the crawler for that range.
+```bash
+rm crawl_progress.json
+```
 
 ### Disk space
 
@@ -535,14 +565,12 @@ Each JSON file is 1-10 KB. For ~29,000 articles, expect approximately **100-200 
 
 ## 12. Known Limitations
 
-1. **No listing page crawl** — the crawler cannot paginate through the listing at `/Page/35` because it uses client-side JavaScript. Instead, it iterates through article IDs directly.
+1. **No embedded media extraction** — the crawler extracts photo URLs from the gallery section but does not download the actual image files. Video embeds and other media in `div.embedBox1` are not extracted.
 
-2. **No embedded media extraction** — the crawler extracts photo URLs from the gallery section but does not download the actual image files. Video embeds and other media in `div.embedBox1` are not extracted.
+2. **Related news not captured** — the "相關新聞" (related news) carousel at the bottom of each article is not extracted. These are links to other articles that can be found by their own IDs.
 
-3. **Related news not captured** — the "相關新聞" (related news) carousel at the bottom of each article is not extracted. These are links to other articles that can be found by their own IDs.
+3. **API stability** — the internal `/WebAPI/News/List` endpoint is undocumented and could change without notice. If the site is redesigned, the API parameters or response format may break.
 
-4. **Rate limiting** — the presidential website may temporarily block rapid requests. The crawler includes automatic backoff detection, but very aggressive crawling may still trigger blocks. If this happens, increase the `--delay` value.
+4. **Single category only** — the crawler targets "總統府新聞" (Presidential Office News) at `/Page/35` (`no=35`). Other sections like presidential orders (`/Page/36`) or daily schedules (`/Page/37`) would require changing the `no` parameter.
 
-5. **Mixed categories** — the crawler targets "總統府新聞" (Presidential Office News) at `/Page/35`. Other sections of the website (presidential orders at `/Page/36`, daily schedules at `/Page/37`, etc.) use the same `/NEWS/{id}` URL space and may also be captured by the ID-based crawl.
-
-6. **Keyword analysis is exact match** — `analyze.py` performs simple substring matching, not word boundary or fuzzy matching. Searching for "台" will also match "台灣", "台北", etc.
+5. **Keyword analysis is exact match** — `analyze.py` performs simple substring matching, not word boundary or fuzzy matching. Searching for "台" will also match "台灣", "台北", etc.
