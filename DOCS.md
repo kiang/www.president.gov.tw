@@ -228,19 +228,34 @@ python3 analyze.py "健康" --by year
 python3 analyze.py "健康" --by date
 ```
 
+#### Filter by date range
+
+```bash
+# Full date
+python3 analyze.py "台灣" --from 2026-03-01 --to 2026-05-31
+
+# Year-month (covers the entire month)
+python3 analyze.py "台灣" --from 2026-03 --to 2026-05
+
+# Year only (covers the entire year)
+python3 analyze.py "川普" --from 2026 --to 2026
+```
+
+Both `--from` and `--to` are optional and can be used independently.
+
 #### List matching article titles
 
 ```bash
-$ python3 analyze.py "川普" --list
-Found 31 articles containing '川普' (out of 601 total)
+$ python3 analyze.py "川普" --from 2026 --list
+Found 18 articles containing '川普' (out of 293 total)
 
-2025-10  ████████████████████████ 3
-2025-11  ████████████████████████████████████████ 5
+2026-01  ██████████████████████████████ 3
+2026-02  ████████████████████████████████████████ 4
 ...
 
 --- Matching articles ---
-  2025-10-07  [39512] 總統接受美國廣播節目...專訪內容
-  2025-10-17  [39540] 副總統接受「加拿大廣播公司」（CBC）專訪
+  2026-01-14  [39764] 總統接見美國亞利桑納州鳳凰城市長...
+  2026-01-21  [39777] 總統接見德國馬歇爾基金會訪團...
   ...
 ```
 
@@ -250,6 +265,8 @@ Found 31 articles containing '川普' (out of 601 total)
 |---|---|---|
 | `keyword` | (required) | Keyword to search for |
 | `--by` | `month` | Group results by `date`, `month`, or `year` |
+| `--from` | (none) | Start date, inclusive (e.g. `2026-01-01`, `2026-01`, or `2026`) |
+| `--to` | (none) | End date, inclusive (e.g. `2026-05-31`, `2026-05`, or `2026`) |
 | `--list` | off | Also print each matching article's date, ID, and title |
 
 ---
