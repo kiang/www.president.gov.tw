@@ -42,10 +42,23 @@ def main():
     parser.add_argument("keyword", help="Keyword to search for")
     parser.add_argument("--by", choices=["date", "month", "year"], default="month",
                         help="Group by date, month, or year (default: month)")
+    parser.add_argument("--from", dest="date_from", help="Start date (inclusive), e.g. 2025-01-01 or 2025-01 or 2025")
+    parser.add_argument("--to", dest="date_to", help="End date (inclusive), e.g. 2026-05-31 or 2026-05 or 2026")
     parser.add_argument("--list", action="store_true", help="List matching article titles")
     args = parser.parse_args()
 
     articles = load_articles()
+
+    if args.date_from:
+        articles = [a for a in articles if a.get("date", "") >= args.date_from]
+    if args.date_to:
+        to = args.date_to
+        if len(to) == 4:
+            to = f"{to}-12-31"
+        elif len(to) == 7:
+            to = f"{to}-31"
+        articles = [a for a in articles if a.get("date", "") <= to]
+
     matches = search(articles, args.keyword)
 
     if not matches:
