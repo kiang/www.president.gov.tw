@@ -157,9 +157,9 @@ def crawl_range(start_id, end_id):
     completed = set(progress["completed_ids"])
     failed = set(progress["failed_ids"])
 
-    ids_to_crawl = [i for i in range(start_id, end_id + 1) if i not in completed]
+    ids_to_crawl = [i for i in range(end_id, start_id - 1, -1) if i not in completed]
     total = len(ids_to_crawl)
-    log.info(f"Crawling {total} IDs from {start_id} to {end_id} ({len(completed)} already done)")
+    log.info(f"Crawling {total} IDs from {end_id} down to {start_id} ({len(completed)} already done)")
 
     found = 0
     not_found = 0
