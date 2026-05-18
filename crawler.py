@@ -167,6 +167,24 @@ def save_article(article):
         json.dump(article, f, ensure_ascii=False, indent=2)
 
 
+def scan_existing_ids():
+    """Scan output directory for already-downloaded article IDs."""
+    existing = set()
+    if not os.path.exists(OUTPUT_DIR):
+        return existing
+    for year_dir in os.listdir(OUTPUT_DIR):
+        dirpath = os.path.join(OUTPUT_DIR, year_dir)
+        if not os.path.isdir(dirpath):
+            continue
+        for filename in os.listdir(dirpath):
+            if filename.endswith(".json"):
+                try:
+                    existing.add(int(filename[:-5]))
+                except ValueError:
+                    pass
+    return existing
+
+
 def crawl_range(start_id, end_id):
     """Crawl a range of news IDs sequentially with rate-limit detection."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -174,7 +192,12 @@ def crawl_range(start_id, end_id):
     completed = set(progress["completed_ids"])
     failed = set(progress["failed_ids"])
 
-    ids_to_crawl = [i for i in range(end_id, start_id - 1, -1) if i not in completed]
+    existing = scan_existing_ids()
+    if existing:
+        log.info(f"Found {len(existing)} existing articles on disk, skipping")
+    skip = completed | existing
+
+    ids_to_crawl = [i for i in range(end_id, start_id - 1, -1) if i not in skip]
     total = len(ids_to_crawl)
     log.info(f"Crawling {total} IDs from {end_id} down to {start_id} ({len(completed)} already done)")
 
