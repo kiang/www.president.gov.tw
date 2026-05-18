@@ -12,13 +12,11 @@ import time
 import logging
 import requests
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://www.president.gov.tw"
 OUTPUT_DIR = "news_json"
 PROGRESS_FILE = "crawl_progress.json"
 MAX_ID = 41000
-WORKERS = 5
 REQUEST_TIMEOUT = 30
 RETRY_COUNT = 3
 DELAY_BETWEEN_REQUESTS = 0.5
@@ -170,7 +168,7 @@ def save_article(article):
 
 
 def crawl_range(start_id, end_id):
-    """Crawl a range of news IDs."""
+    """Crawl a range of news IDs sequentially with rate-limit detection."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     progress = load_progress()
     completed = set(progress["completed_ids"])
@@ -183,40 +181,51 @@ def crawl_range(start_id, end_id):
     found = 0
     not_found = 0
     errors = 0
-    batch_size = 50
+    consecutive_not_found = 0
+    backoff_seconds = DELAY_BETWEEN_REQUESTS
 
-    for batch_start in range(0, total, batch_size):
-        batch = ids_to_crawl[batch_start:batch_start + batch_size]
+    for i, news_id in enumerate(ids_to_crawl):
+        time.sleep(backoff_seconds)
 
-        with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-            futures = {}
-            for news_id in batch:
-                time.sleep(DELAY_BETWEEN_REQUESTS / WORKERS)
-                futures[executor.submit(fetch_article, news_id)] = news_id
+        try:
+            article = fetch_article(news_id)
+            if article:
+                save_article(article)
+                found += 1
+                completed.add(news_id)
+                consecutive_not_found = 0
+                backoff_seconds = DELAY_BETWEEN_REQUESTS
+            else:
+                not_found += 1
+                completed.add(news_id)
+                consecutive_not_found += 1
 
-            for future in as_completed(futures):
-                news_id = futures[future]
-                try:
-                    article = future.result()
-                    if article:
-                        save_article(article)
-                        found += 1
-                        completed.add(news_id)
-                    else:
-                        not_found += 1
-                        completed.add(news_id)
-                except Exception as e:
-                    errors += 1
-                    failed.add(news_id)
-                    log.error(f"Error processing ID {news_id}: {e}")
+                if consecutive_not_found >= 50:
+                    backoff_seconds = min(backoff_seconds * 2, 60)
+                    log.warning(
+                        f"50 consecutive not-found at ID {news_id}, "
+                        f"possible rate limit — backing off to {backoff_seconds}s"
+                    )
+                    consecutive_not_found = 0
+                    time.sleep(backoff_seconds)
 
-        progress["completed_ids"] = sorted(completed)
-        progress["failed_ids"] = sorted(failed)
-        progress["last_id"] = max(batch)
-        save_progress(progress)
+        except Exception as e:
+            errors += 1
+            failed.add(news_id)
+            log.error(f"Error processing ID {news_id}: {e}")
 
-        processed = batch_start + len(batch)
-        log.info(f"Progress: {processed}/{total} | Found: {found} | Not found: {not_found} | Errors: {errors}")
+        processed = i + 1
+        if processed % 100 == 0:
+            progress["completed_ids"] = sorted(completed)
+            progress["failed_ids"] = sorted(failed)
+            progress["last_id"] = news_id
+            save_progress(progress)
+            log.info(f"Progress: {processed}/{total} | Found: {found} | Not found: {not_found} | Errors: {errors}")
+
+    progress["completed_ids"] = sorted(completed)
+    progress["failed_ids"] = sorted(failed)
+    progress["last_id"] = ids_to_crawl[-1] if ids_to_crawl else 0
+    save_progress(progress)
 
     log.info(f"Done. Found: {found}, Not found: {not_found}, Errors: {errors}")
     return found
@@ -224,16 +233,14 @@ def crawl_range(start_id, end_id):
 
 def main():
     import argparse
-    global WORKERS, DELAY_BETWEEN_REQUESTS
+    global DELAY_BETWEEN_REQUESTS
     parser = argparse.ArgumentParser(description="Crawl Presidential Office news articles")
     parser.add_argument("--start", type=int, default=1, help="Starting NEWS ID (default: 1)")
     parser.add_argument("--end", type=int, default=None, help="Ending NEWS ID (default: auto-detect from listing page)")
-    parser.add_argument("--workers", type=int, default=WORKERS, help=f"Number of concurrent workers (default: {WORKERS})")
     parser.add_argument("--delay", type=float, default=DELAY_BETWEEN_REQUESTS, help="Delay between requests in seconds")
     parser.add_argument("--single", type=int, help="Fetch a single article by ID (for testing)")
     args = parser.parse_args()
 
-    WORKERS = args.workers
     DELAY_BETWEEN_REQUESTS = args.delay
 
     end_id = args.end if args.end is not None else detect_max_id()
