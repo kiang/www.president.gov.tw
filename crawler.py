@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
 Crawler for Taiwan Presidential Office news (https://www.president.gov.tw/Page/35)
-Iterates through NEWS IDs and extracts each article as JSON.
+Uses the site's internal API to paginate the listing, then fetches each article.
 """
 
 import json
 import os
 import re
-import sys
 import time
 import logging
 import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://www.president.gov.tw"
+API_URL = f"{BASE_URL}/WebAPI/News/List"
 OUTPUT_DIR = "news_json"
 PROGRESS_FILE = "crawl_progress.json"
-MAX_ID = 41000
 REQUEST_TIMEOUT = 30
 RETRY_COUNT = 3
 DELAY_BETWEEN_REQUESTS = 0.5
@@ -38,27 +37,63 @@ session.headers.update({
     "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
 })
 
 
-def detect_max_id():
-    """Fetch the listing page and find the highest NEWS ID."""
-    try:
-        r = session.get(f"{BASE_URL}/Page/35", timeout=REQUEST_TIMEOUT)
-        r.encoding = "utf-8"
-        soup = BeautifulSoup(r.text, "lxml")
-        max_id = 0
-        for a in soup.find_all("a", href=True):
-            m = re.match(r"/NEWS/(\d+)", a["href"])
-            if m:
-                max_id = max(max_id, int(m.group(1)))
-        if max_id > 0:
-            log.info(f"Detected latest NEWS ID: {max_id}")
-            return max_id
-    except requests.RequestException as e:
-        log.warning(f"Failed to detect max ID: {e}")
-    return MAX_ID
+def init_session():
+    """Visit the listing page once to establish cookies."""
+    session.get(f"{BASE_URL}/Page/35", timeout=REQUEST_TIMEOUT)
+
+
+def fetch_listing_page(page_num):
+    """Fetch one page of the news listing via the internal API.
+    Returns a list of news IDs found on that page, or None on failure."""
+    for attempt in range(RETRY_COUNT):
+        try:
+            r = session.post(API_URL,
+                headers={"CUSTOMER-CSRF-HEADER": ""},
+                data={
+                    "lang": "zh",
+                    "country": "TW",
+                    "detailno": str(page_num),
+                    "tag": "Page",
+                    "no": "35",
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            r.encoding = "utf-8"
+            if r.status_code != 200:
+                if attempt < RETRY_COUNT - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                return None
+
+            soup = BeautifulSoup(r.text, "lxml")
+            ids = []
+            for a in soup.find_all("a", href=True):
+                m = re.match(r"/NEWS/(\d+)", a["href"])
+                if m:
+                    ids.append(int(m.group(1)))
+            return sorted(set(ids), reverse=True)
+
+        except requests.RequestException as e:
+            if attempt < RETRY_COUNT - 1:
+                time.sleep(2 ** attempt)
+                continue
+            log.warning(f"Failed to fetch listing page {page_num}: {e}")
+            return None
+
+    return None
+
+
+def detect_total_pages():
+    """Detect total number of listing pages from the first page."""
+    r = session.get(f"{BASE_URL}/Page/35", timeout=REQUEST_TIMEOUT)
+    r.encoding = "utf-8"
+    m = re.search(r"共\s*(\d+)\s*頁", r.text)
+    if m:
+        return int(m.group(1))
+    return None
 
 
 def roc_to_iso_date(roc_date_str):
@@ -155,7 +190,7 @@ def load_progress():
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r") as f:
             return json.load(f)
-    return {"completed_ids": [], "failed_ids": [], "last_id": 0}
+    return {"completed_pages": [], "last_page": 0}
 
 
 def save_progress(progress):
@@ -189,90 +224,82 @@ def scan_existing_ids():
     return existing
 
 
-def crawl_range(start_id, end_id):
-    """Crawl a range of news IDs sequentially with rate-limit detection."""
+def crawl_all(start_page, end_page, skip_existing=True):
+    """Crawl news by paginating the listing API, then fetching each article."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    existing_ids = scan_existing_ids() if skip_existing else set()
+    if existing_ids:
+        log.info(f"Found {len(existing_ids)} existing articles on disk")
+
     progress = load_progress()
-    completed = set(progress["completed_ids"])
-    failed = set(progress["failed_ids"])
+    completed_pages = set(progress["completed_pages"])
 
-    existing = scan_existing_ids()
-    if existing:
-        log.info(f"Found {len(existing)} existing articles on disk, skipping")
-    skip = completed | existing
+    total_found = 0
+    total_skipped = 0
+    total_errors = 0
 
-    ids_to_crawl = [i for i in range(end_id, start_id - 1, -1) if i not in skip]
-    total = len(ids_to_crawl)
-    log.info(f"Crawling {total} IDs from {end_id} down to {start_id} ({len(completed)} already done)")
+    for page_num in range(start_page, end_page + 1):
+        if page_num in completed_pages:
+            continue
 
-    found = 0
-    not_found = 0
-    errors = 0
-    consecutive_not_found = 0
-    backoff_seconds = DELAY_BETWEEN_REQUESTS
+        time.sleep(DELAY_BETWEEN_REQUESTS)
+        ids = fetch_listing_page(page_num)
+        if ids is None:
+            log.error(f"Failed to fetch listing page {page_num}, skipping")
+            total_errors += 1
+            continue
 
-    for i, news_id in enumerate(ids_to_crawl):
-        time.sleep(backoff_seconds)
+        page_found = 0
+        page_skipped = 0
+        for news_id in ids:
+            if skip_existing and news_id in existing_ids:
+                page_skipped += 1
+                continue
 
-        try:
+            time.sleep(DELAY_BETWEEN_REQUESTS)
             article = fetch_article(news_id)
             if article:
                 save_article(article)
-                found += 1
-                completed.add(news_id)
-                consecutive_not_found = 0
-                backoff_seconds = DELAY_BETWEEN_REQUESTS
+                existing_ids.add(news_id)
+                page_found += 1
             else:
-                not_found += 1
-                completed.add(news_id)
-                consecutive_not_found += 1
+                total_errors += 1
+                log.warning(f"Could not fetch article {news_id} from page {page_num}")
 
-                if consecutive_not_found >= 50:
-                    backoff_seconds = min(backoff_seconds * 2, 60)
-                    log.warning(
-                        f"50 consecutive not-found at ID {news_id}, "
-                        f"possible rate limit — backing off to {backoff_seconds}s"
-                    )
-                    consecutive_not_found = 0
-                    time.sleep(backoff_seconds)
+        total_found += page_found
+        total_skipped += page_skipped
 
-        except Exception as e:
-            errors += 1
-            failed.add(news_id)
-            log.error(f"Error processing ID {news_id}: {e}")
+        completed_pages.add(page_num)
+        progress["completed_pages"] = sorted(completed_pages)
+        progress["last_page"] = page_num
+        save_progress(progress)
 
-        processed = i + 1
-        if processed % 100 == 0:
-            progress["completed_ids"] = sorted(completed)
-            progress["failed_ids"] = sorted(failed)
-            progress["last_id"] = news_id
-            save_progress(progress)
-            log.info(f"Progress: {processed}/{total} | Found: {found} | Not found: {not_found} | Errors: {errors}")
+        log.info(
+            f"Page {page_num}/{end_page} | "
+            f"IDs: {len(ids)} | Fetched: {page_found} | Skipped: {page_skipped} | "
+            f"Total: {total_found} fetched, {total_skipped} skipped, {total_errors} errors"
+        )
 
-    progress["completed_ids"] = sorted(completed)
-    progress["failed_ids"] = sorted(failed)
-    progress["last_id"] = ids_to_crawl[-1] if ids_to_crawl else 0
-    save_progress(progress)
-
-    log.info(f"Done. Found: {found}, Not found: {not_found}, Errors: {errors}")
-    return found
+    log.info(f"Done. Fetched: {total_found}, Skipped: {total_skipped}, Errors: {total_errors}")
+    return total_found
 
 
 def main():
     import argparse
     global DELAY_BETWEEN_REQUESTS
     parser = argparse.ArgumentParser(description="Crawl Presidential Office news articles")
-    parser.add_argument("--start", type=int, default=1, help="Starting NEWS ID (default: 1)")
-    parser.add_argument("--end", type=int, default=None, help="Ending NEWS ID (default: auto-detect from listing page)")
+    parser.add_argument("--start-page", type=int, default=1, help="Starting listing page (default: 1, newest)")
+    parser.add_argument("--end-page", type=int, default=None, help="Ending listing page (default: auto-detect last page)")
     parser.add_argument("--delay", type=float, default=DELAY_BETWEEN_REQUESTS, help="Delay between requests in seconds")
+    parser.add_argument("--no-skip", action="store_true", help="Re-fetch articles even if already on disk")
     parser.add_argument("--single", type=int, help="Fetch a single article by ID (for testing)")
     args = parser.parse_args()
 
     DELAY_BETWEEN_REQUESTS = args.delay
 
-    end_id = args.end if args.end is not None else detect_max_id()
-
     if args.single:
+        init_session()
         article = fetch_article(args.single)
         if article:
             print(json.dumps(article, ensure_ascii=False, indent=2))
@@ -280,7 +307,18 @@ def main():
             print(f"Article {args.single} not found")
         return
 
-    crawl_range(args.start, end_id)
+    init_session()
+
+    end_page = args.end_page
+    if end_page is None:
+        end_page = detect_total_pages()
+        if end_page:
+            log.info(f"Detected {end_page} total listing pages")
+        else:
+            log.error("Could not detect total pages")
+            return
+
+    crawl_all(args.start_page, end_page, skip_existing=not args.no_skip)
 
 
 if __name__ == "__main__":

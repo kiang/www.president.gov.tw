@@ -9,11 +9,13 @@ import json
 import os
 import sys
 import time
+import math
 import logging
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crawler import (
-    detect_max_id,
+    init_session,
+    fetch_listing_page,
     fetch_article,
     save_article,
     DELAY_BETWEEN_REQUESTS,
@@ -34,34 +36,42 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 COUNT = 50
+ITEMS_PER_PAGE = 15
 
 
 def crawl_latest(count=COUNT):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    max_id = detect_max_id()
+    init_session()
 
+    pages_needed = math.ceil(count / ITEMS_PER_PAGE)
     found = 0
-    not_found = 0
     errors = 0
-    news_id = max_id
 
-    while found < count and news_id > 0:
+    for page_num in range(1, pages_needed + 1):
         time.sleep(DELAY_BETWEEN_REQUESTS)
-        try:
+        ids = fetch_listing_page(page_num)
+        if ids is None:
+            log.error(f"Failed to fetch listing page {page_num}")
+            errors += 1
+            continue
+
+        for news_id in ids:
+            if found >= count:
+                break
+            time.sleep(DELAY_BETWEEN_REQUESTS)
             article = fetch_article(news_id)
             if article:
                 save_article(article)
                 found += 1
                 log.info(f"[{found}/{count}] ID {news_id}: {article['title'][:40]}")
             else:
-                not_found += 1
-        except Exception as e:
-            errors += 1
-            log.error(f"Error fetching ID {news_id}: {e}")
+                errors += 1
+                log.warning(f"Could not fetch article {news_id}")
 
-        news_id -= 1
+        if found >= count:
+            break
 
-    log.info(f"Done. Found: {found}, Not found: {not_found}, Errors: {errors}")
+    log.info(f"Done. Fetched: {found}, Errors: {errors}")
     return found
 
 
