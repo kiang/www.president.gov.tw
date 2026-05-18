@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Fetch the latest 50 news articles from the Taiwan Presidential Office.
+Fetch the latest 2 pages of news from the Taiwan Presidential Office.
 Always overwrites existing JSON files to keep them up to date.
 Designed to run as a daily cron job.
 """
 
-import json
 import os
 import sys
 import time
-import math
 import logging
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -35,19 +33,17 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-COUNT = 50
-ITEMS_PER_PAGE = 15
+PAGES = 2
 
 
-def crawl_latest(count=COUNT):
+def crawl_latest(pages=PAGES):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     init_session()
 
-    pages_needed = math.ceil(count / ITEMS_PER_PAGE)
     found = 0
     errors = 0
 
-    for page_num in range(1, pages_needed + 1):
+    for page_num in range(1, pages + 1):
         time.sleep(DELAY_BETWEEN_REQUESTS)
         ids = fetch_listing_page(page_num)
         if ids is None:
@@ -56,20 +52,15 @@ def crawl_latest(count=COUNT):
             continue
 
         for news_id in ids:
-            if found >= count:
-                break
             time.sleep(DELAY_BETWEEN_REQUESTS)
             article = fetch_article(news_id)
             if article:
                 save_article(article)
                 found += 1
-                log.info(f"[{found}/{count}] ID {news_id}: {article['title'][:40]}")
+                log.info(f"[{found}] ID {news_id}: {article['title'][:40]}")
             else:
                 errors += 1
                 log.warning(f"Could not fetch article {news_id}")
-
-        if found >= count:
-            break
 
     log.info(f"Done. Fetched: {found}, Errors: {errors}")
     return found
