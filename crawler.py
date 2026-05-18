@@ -40,6 +40,25 @@ session.headers.update({
 })
 
 
+def detect_max_id():
+    """Fetch the listing page and find the highest NEWS ID."""
+    try:
+        r = session.get(f"{BASE_URL}/Page/35", timeout=REQUEST_TIMEOUT)
+        r.encoding = "utf-8"
+        soup = BeautifulSoup(r.text, "lxml")
+        max_id = 0
+        for a in soup.find_all("a", href=True):
+            m = re.match(r"/NEWS/(\d+)", a["href"])
+            if m:
+                max_id = max(max_id, int(m.group(1)))
+        if max_id > 0:
+            log.info(f"Detected latest NEWS ID: {max_id}")
+            return max_id
+    except requests.RequestException as e:
+        log.warning(f"Failed to detect max ID: {e}")
+    return MAX_ID
+
+
 def roc_to_iso_date(roc_date_str):
     """Convert ROC date like '115年05月16日' to ISO format '2026-05-16'."""
     m = re.match(r"(\d+)年(\d+)月(\d+)日", roc_date_str)
@@ -208,7 +227,7 @@ def main():
     global WORKERS, DELAY_BETWEEN_REQUESTS
     parser = argparse.ArgumentParser(description="Crawl Presidential Office news articles")
     parser.add_argument("--start", type=int, default=1, help="Starting NEWS ID (default: 1)")
-    parser.add_argument("--end", type=int, default=MAX_ID, help=f"Ending NEWS ID (default: {MAX_ID})")
+    parser.add_argument("--end", type=int, default=None, help="Ending NEWS ID (default: auto-detect from listing page)")
     parser.add_argument("--workers", type=int, default=WORKERS, help=f"Number of concurrent workers (default: {WORKERS})")
     parser.add_argument("--delay", type=float, default=DELAY_BETWEEN_REQUESTS, help="Delay between requests in seconds")
     parser.add_argument("--single", type=int, help="Fetch a single article by ID (for testing)")
@@ -216,6 +235,8 @@ def main():
 
     WORKERS = args.workers
     DELAY_BETWEEN_REQUESTS = args.delay
+
+    end_id = args.end if args.end is not None else detect_max_id()
 
     if args.single:
         article = fetch_article(args.single)
@@ -225,7 +246,7 @@ def main():
             print(f"Article {args.single} not found")
         return
 
-    crawl_range(args.start, args.end)
+    crawl_range(args.start, end_id)
 
 
 if __name__ == "__main__":
