@@ -221,7 +221,7 @@ python3 crawler.py --delay 1.0
 python3 crawler_latest.py
 ```
 
-Fetches the **50 most recent** articles by paginating through the first few listing pages. **Always overwrites** existing JSON files to capture any edits or corrections to recent articles.
+Fetches the **latest 2 listing pages** (~30 articles) from the site. **Always overwrites** existing JSON files to capture any edits or corrections to recent articles.
 
 This script is designed to be run daily via `cron.sh`.
 
@@ -420,9 +420,8 @@ This eliminates the previous approach of guessing sequential IDs, which wasted r
 ### crawler_latest.py — daily update
 
 1. **Initialize session** — same as above.
-2. **Paginate from page 1** — fetch listing pages starting from the newest.
-3. **Fetch each article** — always overwrite, no skip check.
-4. **Stop after 50** — once 50 articles have been saved, exit.
+2. **Fetch listing pages 1 and 2** — get article IDs from the two newest pages (~30 articles).
+3. **Fetch each article** — always overwrite existing files, no skip check.
 
 ### fetch_article — shared core
 
